@@ -11,6 +11,7 @@ import com.rohittp.pair.R
 import com.rohittp.pair.core.BluePairActions
 import com.rohittp.pair.core.BluePairPrefs
 import com.rohittp.pair.routing.BluePairController
+import com.rohittp.pair.routing.RoutingState
 
 class BluePairWidgetProvider : AppWidgetProvider() {
     override fun onUpdate(
@@ -44,10 +45,17 @@ class BluePairWidgetProvider : AppWidgetProvider() {
         }
 
         private fun buildRemoteViews(context: Context): RemoteViews {
-            val isEnabled = BluePairPrefs.isBluetoothModeEnabled(context)
-            val statusText = context.getString(
-                if (isEnabled) R.string.widget_status_on else R.string.widget_status_off
-            )
+            val routingState = BluePairPrefs.getRoutingState(context)
+            val statusText = when (routingState) {
+                RoutingState.ACTIVE_DUAL -> context.getString(R.string.routing_state_active_dual)
+                RoutingState.ACTIVE_SINGLE -> context.getString(R.string.routing_state_active_single)
+                RoutingState.WAITING -> context.getString(R.string.routing_state_waiting)
+                RoutingState.ENABLING -> context.getString(R.string.routing_state_enabling)
+                RoutingState.PLATFORM_LIMITED -> context.getString(R.string.routing_state_platform_limited)
+                RoutingState.BLOCKED_CONFIG -> context.getString(R.string.routing_state_blocked_config)
+                RoutingState.BLOCKED_PERMISSION -> context.getString(R.string.routing_state_blocked_permission)
+                RoutingState.OFF -> context.getString(R.string.routing_state_off)
+            }
 
             val toggleIntent = Intent(context, BluePairWidgetProvider::class.java).apply {
                 action = BluePairActions.ACTION_TOGGLE_FROM_WIDGET

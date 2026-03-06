@@ -6,6 +6,7 @@ import android.service.quicksettings.TileService
 import com.rohittp.pair.R
 import com.rohittp.pair.core.BluePairPrefs
 import com.rohittp.pair.routing.BluePairController
+import com.rohittp.pair.routing.RoutingState
 
 class BluePairTileService : TileService() {
     override fun onStartListening() {
@@ -22,11 +23,19 @@ class BluePairTileService : TileService() {
     private fun updateTileState() {
         val tile = qsTile ?: return
         val isEnabled = BluePairPrefs.isBluetoothModeEnabled(this)
+        val routingState = BluePairPrefs.getRoutingState(this)
         tile.state = if (isEnabled) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
         tile.label = getString(R.string.tile_label)
-        tile.subtitle = getString(
-            if (isEnabled) R.string.widget_status_on else R.string.widget_status_off
-        )
+        tile.subtitle = when (routingState) {
+            RoutingState.ACTIVE_DUAL -> getString(R.string.routing_state_active_dual)
+            RoutingState.ACTIVE_SINGLE -> getString(R.string.routing_state_active_single)
+            RoutingState.WAITING -> getString(R.string.routing_state_waiting)
+            RoutingState.ENABLING -> getString(R.string.routing_state_enabling)
+            RoutingState.PLATFORM_LIMITED -> getString(R.string.routing_state_platform_limited)
+            RoutingState.BLOCKED_CONFIG -> getString(R.string.routing_state_blocked_config)
+            RoutingState.BLOCKED_PERMISSION -> getString(R.string.routing_state_blocked_permission)
+            RoutingState.OFF -> getString(R.string.routing_state_off)
+        }
         tile.updateTile()
     }
 

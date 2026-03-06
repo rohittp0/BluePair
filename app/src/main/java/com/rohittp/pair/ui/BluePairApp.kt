@@ -3,7 +3,6 @@ package com.rohittp.pair.ui
 import android.Manifest
 import android.content.ActivityNotFoundException
 import android.content.Intent
-import android.net.Uri
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -22,6 +21,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Settings
@@ -44,10 +44,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.ClipboardManager
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.core.net.toUri
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.NavHost
@@ -55,6 +59,12 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.rohittp.pair.R
+import com.rohittp.pair.routing.RoutingDiagnosticsRecord
+import com.rohittp.pair.routing.RoutingState
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 
 private const val BLUE_PAIR_REPO_URL = "https://github.com/rohittp0/BluePair"
 
@@ -108,7 +118,10 @@ fun BluePairApp(viewModel: BluePairViewModel = viewModel()) {
             composable("home") {
                 HomeScreen(
                     uiState = uiState,
-                    onToggleOutput = viewModel::toggleOutputMode
+                    onToggleOutput = viewModel::toggleOutputMode,
+                    onOpenConfigure = { navController.navigate("configure") },
+                    onOpenTroubleshoot = { navController.navigate("troubleshoot") },
+                    onRunOemAutomation = viewModel::runOemAutomation
                 )
             }
             composable("configure") {
@@ -128,6 +141,18 @@ fun BluePairApp(viewModel: BluePairViewModel = viewModel()) {
             composable("about") {
                 AboutScreen()
             }
+            composable("troubleshoot") {
+                TroubleshootScreen(
+                    uiState = uiState,
+                    onCopyDiagnostics = { clipboard ->
+                        clipboard.setText(AnnotatedString(viewModel.diagnosticsAsText()))
+                    },
+                    onClearDiagnostics = viewModel::clearDiagnostics,
+                    onRequestShizukuPermission = viewModel::requestShizukuPermission,
+                    onMarkBaseline = viewModel::markOemBaselineSnapshot,
+                    onCaptureDiff = viewModel::captureOemSnapshotDiff
+                )
+            }
         }
     }
 }
@@ -135,8 +160,12 @@ fun BluePairApp(viewModel: BluePairViewModel = viewModel()) {
 @Composable
 private fun HomeScreen(
     uiState: BluePairUiState,
-    onToggleOutput: () -> Unit
+    onToggleOutput: () -> Unit,
+    onOpenConfigure: () -> Unit,
+    onOpenTroubleshoot: () -> Unit,
+    onRunOemAutomation: () -> Unit
 ) {
+    val context = LocalContext.current
     val leftName = uiState.leftAddress?.let(uiState.deviceNameByAddress::get)
         ?: stringResource(R.string.unassigned)
     val rightName = uiState.rightAddress?.let(uiState.deviceNameByAddress::get)
@@ -145,7 +174,8 @@ private fun HomeScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(24.dp),
+            .padding(24.dp)
+            .verticalScroll(rememberScrollState()),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
@@ -183,6 +213,105 @@ private fun HomeScreen(
         Spacer(modifier = Modifier.height(24.dp))
         Text(text = stringResource(R.string.left_device_summary, leftName))
         Text(text = stringResource(R.string.right_device_summary, rightName))
+        uiState.actionMessage?.let { message ->
+            Spacer(modifier = Modifier.height(16.dp))
+            Text(
+                text = message,
+                color = MaterialTheme.colorScheme.error,
+                textAlign = TextAlign.Center
+            )
+        }
+
+        Spacer(modifier = Modifier.height(18.dp))
+        RoutingStatusCard(
+            uiState = uiState,
+            onOpenConfigure = onOpenConfigure,
+            onOpenTroubleshoot = onOpenTroubleshoot,
+            onRunOemAutomation = onRunOemAutomation,
+            onOpenBluetoothSettings = {
+                try {
+                    context.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))
+                } catch (_: ActivityNotFoundException) {
+                    // No-op if settings screen is unavailable.
+                }
+            }
+        )
+    }
+}
+
+@Composable
+private fun RoutingStatusCard(
+    uiState: BluePairUiState,
+    onOpenConfigure: () -> Unit,
+    onOpenTroubleshoot: () -> Unit,
+    onRunOemAutomation: () -> Unit,
+    onOpenBluetoothSettings: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 6.dp)
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Text(
+                text = routingStateTitle(uiState.routingState),
+                style = MaterialTheme.typography.titleMedium
+            )
+            if (uiState.routingDetail.isNotBlank()) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(text = uiState.routingDetail, style = MaterialTheme.typography.bodyMedium)
+            }
+            if (uiState.oemControllerName.isNotBlank()) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = stringResource(R.string.oem_controller_label, uiState.oemControllerName),
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+            Spacer(modifier = Modifier.height(10.dp))
+            Row {
+                if (uiState.routingState == RoutingState.BLOCKED_CONFIG ||
+                    uiState.routingState == RoutingState.BLOCKED_PERMISSION
+                ) {
+                    OutlinedButton(onClick = onOpenConfigure) {
+                        Text(text = stringResource(R.string.status_action_configure))
+                    }
+                    Spacer(modifier = Modifier.size(8.dp))
+                }
+                if (uiState.routingState == RoutingState.ACTIVE_SINGLE ||
+                    uiState.routingState == RoutingState.PLATFORM_LIMITED ||
+                    uiState.routingState == RoutingState.WAITING
+                ) {
+                    OutlinedButton(onClick = onOpenTroubleshoot) {
+                        androidx.compose.material3.Icon(Icons.Default.Build, null)
+                        Spacer(modifier = Modifier.size(6.dp))
+                        Text(text = stringResource(R.string.status_action_troubleshoot))
+                    }
+                    Spacer(modifier = Modifier.size(8.dp))
+                    OutlinedButton(onClick = onRunOemAutomation) {
+                        Text(text = stringResource(R.string.status_action_automation))
+                    }
+                    Spacer(modifier = Modifier.size(8.dp))
+                    OutlinedButton(onClick = onOpenBluetoothSettings) {
+                        Text(text = stringResource(R.string.open_bt_settings))
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun routingStateTitle(state: RoutingState): String {
+    return when (state) {
+        RoutingState.OFF -> stringResource(R.string.routing_state_off)
+        RoutingState.ENABLING -> stringResource(R.string.routing_state_enabling)
+        RoutingState.ACTIVE_DUAL -> stringResource(R.string.routing_state_active_dual)
+        RoutingState.ACTIVE_SINGLE -> stringResource(R.string.routing_state_active_single)
+        RoutingState.WAITING -> stringResource(R.string.routing_state_waiting)
+        RoutingState.BLOCKED_CONFIG -> stringResource(R.string.routing_state_blocked_config)
+        RoutingState.BLOCKED_PERMISSION -> stringResource(R.string.routing_state_blocked_permission)
+        RoutingState.PLATFORM_LIMITED -> stringResource(R.string.routing_state_platform_limited)
     }
 }
 
@@ -372,6 +501,147 @@ private fun ChannelAssignmentScreen(
 }
 
 @Composable
+private fun TroubleshootScreen(
+    uiState: BluePairUiState,
+    onCopyDiagnostics: (ClipboardManager) -> Unit,
+    onClearDiagnostics: () -> Unit,
+    onRequestShizukuPermission: () -> Unit,
+    onMarkBaseline: () -> Unit,
+    onCaptureDiff: () -> Unit
+) {
+    val clipboard = LocalClipboardManager.current
+    val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
+        .withLocale(Locale.getDefault())
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp)
+            .verticalScroll(rememberScrollState())
+    ) {
+        Text(
+            text = stringResource(R.string.troubleshoot_title),
+            style = MaterialTheme.typography.headlineSmall
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(text = stringResource(R.string.troubleshoot_subtitle))
+        uiState.actionMessage?.let { message ->
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = message,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
+        Spacer(modifier = Modifier.height(12.dp))
+        Text(
+            text = stringResource(
+                R.string.troubleshoot_shizuku_status,
+                uiState.shizukuBinderAlive.toString(),
+                uiState.shizukuPermissionGranted.toString()
+            ),
+            style = MaterialTheme.typography.bodySmall
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        OutlinedButton(onClick = onRequestShizukuPermission) {
+            Text(text = stringResource(R.string.troubleshoot_request_shizuku))
+        }
+        Spacer(modifier = Modifier.height(10.dp))
+        Row {
+            OutlinedButton(onClick = { onCopyDiagnostics(clipboard) }) {
+                Text(text = stringResource(R.string.troubleshoot_copy))
+            }
+            Spacer(modifier = Modifier.size(10.dp))
+            OutlinedButton(onClick = onClearDiagnostics) {
+                Text(text = stringResource(R.string.troubleshoot_clear))
+            }
+        }
+        Spacer(modifier = Modifier.height(10.dp))
+        Row {
+            OutlinedButton(onClick = onMarkBaseline) {
+                Text(text = stringResource(R.string.troubleshoot_mark_baseline))
+            }
+            Spacer(modifier = Modifier.size(10.dp))
+            OutlinedButton(onClick = onCaptureDiff) {
+                Text(text = stringResource(R.string.troubleshoot_capture_diff))
+            }
+        }
+        Spacer(modifier = Modifier.height(14.dp))
+
+        Text(
+            text = stringResource(R.string.troubleshoot_snapshot_title),
+            style = MaterialTheme.typography.titleMedium
+        )
+        Spacer(modifier = Modifier.height(6.dp))
+        if (uiState.oemSnapshotDiff.isBlank()) {
+            Text(text = stringResource(R.string.troubleshoot_snapshot_empty))
+        } else {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    text = uiState.oemSnapshotDiff,
+                    modifier = Modifier.padding(12.dp),
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+        }
+        Spacer(modifier = Modifier.height(14.dp))
+
+        if (uiState.diagnostics.isEmpty()) {
+            Text(text = stringResource(R.string.troubleshoot_empty))
+            return
+        }
+
+        uiState.diagnostics.asReversed().forEach { record ->
+            DiagnosticsCard(record = record, formatter = formatter)
+            Spacer(modifier = Modifier.height(8.dp))
+        }
+    }
+}
+
+@Composable
+private fun DiagnosticsCard(
+    record: RoutingDiagnosticsRecord,
+    formatter: DateTimeFormatter
+) {
+    val timestamp = Instant.ofEpochMilli(record.timestampMs)
+        .atZone(ZoneId.systemDefault())
+        .format(formatter)
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Text(text = "$timestamp - ${record.state.rawValue}", style = MaterialTheme.typography.titleSmall)
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(text = record.detail, style = MaterialTheme.typography.bodyMedium)
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = "requested=${record.requestedAddresses}",
+                style = MaterialTheme.typography.bodySmall
+            )
+            Text(
+                text = "a2dp=${record.a2dpConnectedAddresses}",
+                style = MaterialTheme.typography.bodySmall
+            )
+            Text(
+                text = "headset=${record.headsetConnectedAddresses}",
+                style = MaterialTheme.typography.bodySmall
+            )
+            Text(
+                text = "le=${record.leConnectedAddresses}",
+                style = MaterialTheme.typography.bodySmall
+            )
+            Text(
+                text = "outputs=${record.activeOutputAddresses}",
+                style = MaterialTheme.typography.bodySmall
+            )
+            Text(
+                text = "device=${record.manufacturer} / ${record.model} / sdk=${record.sdkInt}",
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
+    }
+}
+
+@Composable
 private fun AboutScreen() {
     val context = LocalContext.current
 
@@ -394,7 +664,7 @@ private fun AboutScreen() {
         Spacer(modifier = Modifier.height(16.dp))
         TextButton(
             onClick = {
-                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(BLUE_PAIR_REPO_URL))
+                val intent = Intent(Intent.ACTION_VIEW, BLUE_PAIR_REPO_URL.toUri())
                 context.startActivity(intent)
             }
         ) {
